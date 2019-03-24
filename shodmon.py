@@ -3,9 +3,17 @@
 # Shodan Monitoring Tool
 # By NGrovyer
 
+SHODAN_API_KEY = "############" #Your Shodan Key
+shodan_query_expression='ASN:AS394161' #Your Shodan Query expression, Taking Tesla as Example
+smtp_username=fromaddr="senderemail@address.com"    #Your SMTP Username, also the From addresss in email
+smtp_password="SMTPPASSWORD"            #Your SMTP Password
+email_receivers=["receivers@email.com"      #Comma separated List of Receivers 
+                 ]
+
 import time
 import datetime
 from shodan import Shodan                       #pip install shodan
+from shodan import exception as Shodan_exception                       #pip install shodan
 import sys
 import sqlite3
 import json
@@ -22,8 +30,6 @@ import ast
 
 conn = sqlite3.connect('shodan_db.sqlite')
 
-SHODAN_API_KEY = "############" #Your Shodan Key
-
 # Create a connection to the Shodan API
 api = Shodan(SHODAN_API_KEY)
 
@@ -31,25 +37,40 @@ api = Shodan(SHODAN_API_KEY)
 def query_Shodan(term, callback):
     print "Runing Shodan Query"
     templist = []
+    previous_ip=""
     while True:
         try:
-            #Search Shodan and get bunch of IP Addresses (limit 100)
+            #Search Shodan and get bunch of IP Addresses (limit 100, you can increase it even more as per the number of servers you are planning to monitor)
             results = api.search(term,page=1,limit=100)
-            counter=1
-            
             #Construct a temp dictionary to store details of each of IP Address
+            
             for result in results['matches']:
+
+                #Shodan repeat IP entries for each port Open on an IP, the below code is for that
+                if  previous_ip==result['ip_str']:
+                    continue
+                else:
+                    previous_ip=result['ip_str']
+                
+                #print "Reached here"
+                #print result
                 temp = {}
                 temp["Query"] = term
                 time.sleep(1)
                 #Fetch details of each  of IP one by one
-                host = api.host('%s' %result['ip'])
-
+                try:
+                    host = api.host('%s' %result['ip'])
+                except Shodan_exception.APIError, e:
+                    #No results found, print no 'matches'
+                    
+                    print "No "+result['ip_str']+' %s\r' %e
+                    continue
+                
                 ip = '%s' %host.get('ip_str', None)
-
+                
                 #IP Stored as string
                 temp["IP"] = ip.encode('ascii', 'replace')
-
+                
                 #Hostname also as string
                 hostnames = s = ''.join(host.get('hostnames', None))
                 temp["Hostnames"] = hostnames.encode('ascii', 'replace')
@@ -71,20 +92,18 @@ def query_Shodan(term, callback):
                 
                 #Convert Ports to array list
                 port_list=temp["Ports"].strip("[").strip("]").split(",")
-                
+                                
                 #Get hash data from data row
                 hash_data = host.get('data')
-                i=0
 
+                i=0
                 #For each port, create dictionary with port=>Hash
                 for portname in port_list:
                     port_dict[hash_data[i]['port']]=str(hash_data[i]['hash'])
                     i=i+1
 
-                #Conert that dictonary into string for processing in next function
+                #Convert that dictonary into string for processing in next function
                 temp["hash_data"] = str(port_dict)
-
-                counter=counter+1
 
                 #Create mega list consisting of each of nested list
                 templist.append(temp)
@@ -92,8 +111,10 @@ def query_Shodan(term, callback):
             break
         except Exception, e:
             #No results found, print no 'matches'
-            print 'No %s\r' %e
+            print '%s\r' %e
+            
     #Returns a list of dictionary objects. Each dictionary is a result
+    print "Reached Return"
     return templist
 
 count_var=0
@@ -103,11 +124,11 @@ def print_result(info):
     #This function exist for existance purpose, cause I dont want to screw up the code LOL
 
 def run_shodan_query():
-    global know_ip_dns_mapping
+    global know_ip_dns_mapping, shodan_query_expression
     #Variable that flips as soon as one change is detected, changes subject line of mail
     is_changed=False
     message_body=""     #Variable which will create mail body of your email
-    list = query_Shodan('ASN:\"AS394161\"',print_result) #This is main query, could be done on basis of ASN or anything else, based on shodan format
+    list = query_Shodan(shodan_query_expression,print_result) #This is main query, could be done on basis of ASN or anything else, based on shodan format
     print "Processing"
 
     list_length=len(list)   #Number of results fetched from shodan
@@ -179,8 +200,12 @@ def run_shodan_query():
         if len(q) != 0:
 
             #Convert ports into a list
+            live_new_ports=[]
             ports_list =ports.strip("[").strip("]").split(",")
-
+            for port_live in ports_list:
+                live_new_ports.append(int(port_live))
+            ports_list=live_new_ports
+                        
             #Convert both strings into dictionaries
             hash_live_dict=ast.literal_eval(hash_data)
             db_hash_dict=ast.literal_eval(q[0][1])
@@ -206,8 +231,13 @@ def run_shodan_query():
                 
 	    #Breaking Port string into a list
             db_ports_list=q[0][2].strip("[").strip("]").split(",")
+            db_new_ports=[]
+            for db_port in db_ports_list:
+                db_new_ports.append(int(db_port))
+            db_ports_list=db_new_ports
             
             #First check if length is equal, if not clearly port has changed
+            
             if len(ports_list) == len(db_ports_list):
                 #Iterate over each live port and see if they are same as what we have in DB
                 for port_check in ports_list:
@@ -253,10 +283,9 @@ def run_shodan_query():
 	
 #Mailer
 def send_mail(msg_body,subject):
+    global smtp_password, smtp_username,email_receivers
     # Addresses to Send on
     print "Drafing Mail body"
-    fromaddr = "youremail@gmail.com"        #Your Sender Email Address
-    toaddr = "emailaddress@tobe.sent"       #Your Recipent Email Address
     
     #Mail Body starts
     text_body = ""
@@ -294,8 +323,9 @@ def send_mail(msg_body,subject):
     #This is incase gmail connectivity dont happen at once.
     while True:
         try:
-            s.login(fromaddr, "##YOURPASSWORD##")           #YOUR GMAIL PASSWORD, to log into gmail smtp server
-            s.sendmail(fromaddr, toaddr, str_io.getvalue())
+            s.login(smtp_username, smtp_password)           #Log into SMTP Server
+            for toaddr in email_receivers:                  #Loop to go through entire receiver list and send them mail one by one.
+                s.sendmail(fromaddr, toaddr, str_io.getvalue())
             break
         except Exception as x:
             print x
@@ -308,11 +338,12 @@ def send_mail(msg_body,subject):
     print "Mail Sent @ "+str(st)
     print "\n\n"
 
-#The below is dictionary mapping, for known servers and their domain names. If something unknown Pop up, that either needs to be mapped, or needs to be investigated
+#The below is dictionary mapping, for known exposed servers and their domain names (or whatever that can make you understand IP)
+#If something unknown Pop up, that either needs to be mapped, or needs to be investigated
+#
 know_ip_dns_mapping={
-  "209.133.79.81": "sso.tesla.com",
-  "209.133.79.66": "sso-dev.tesla.com",
-  "209.133.79.38": "Teslamotors.com"
+  "209.133.79.64": "SSO Tesla",       #This is Just an Example
+
 }
 
 #Run the script first time to immediately gather data.
